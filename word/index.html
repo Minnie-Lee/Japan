@@ -16,7 +16,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;800&family=DotGothic16&display=swap">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=20260925c">
 </head>
 <body data-view="home">
 
@@ -43,7 +43,7 @@
     <div class="progress-card">
       <div class="pc-top">
         <span class="pc-label"><i class="lamp" aria-hidden="true"></i>学習進捗 · 학습 진행률</span>
-        <button id="home-reset-btn" class="text-btn" onclick="resetProgress()" hidden>기록 초기화</button>
+        <button id="home-records-btn" class="text-btn" onclick="openRecordsModal()">기록 관리</button>
       </div>
       <div class="pc-main"><b id="home-progress-pct">0</b><span>%</span></div>
       <div class="stack-bar" aria-hidden="true">
@@ -55,12 +55,23 @@
         <span><i class="dot dot-wrong"></i>틀림 <b id="home-fail-count">0</b></span>
         <span class="pc-total">전체 <b id="home-total-count">0</b></span>
       </div>
+      <div class="pc-stats pc-sub">
+        <span>読み 읽기 <b id="home-read-pass">0</b><em>/</em><b id="home-read-fail" class="led-red">0</b></span>
+        <span>済 외운 카드 <b id="home-memo-count">0</b></span>
+      </div>
       <p id="home-progress-caption" class="pc-caption">퀴즈를 풀면 여기에 진행률이 쌓여요</p>
     </div>
 
+    <!-- 이어서 학습 -->
+    <button id="resume-row" class="resume-row" onclick="resumeLast()" hidden>
+      <span class="resume-label">つぎは · 이어서</span>
+      <span id="resume-text" class="resume-text"></span>
+      <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+    </button>
+
     <!-- 노선도 (메뉴) -->
     <div class="menu-group">
-      <p class="group-label">학습 노선 <span>3개 역</span></p>
+      <p class="group-label">학습 노선 <span>4개 역</span></p>
       <div class="menu-list route">
         <button class="menu-item" onclick="switchView('learn')">
           <span class="eki-num" aria-hidden="true"><small>JL</small>01</span>
@@ -86,6 +97,14 @@
           </span>
           <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
         </button>
+        <button class="menu-item" onclick="switchView('reading')">
+          <span class="eki-num" aria-hidden="true"><small>JL</small>04</span>
+          <span class="menu-text">
+            <b>한자 읽기 <em class="badge">NEW</em></b>
+            <small>요미가나만 따로 카드·퀴즈로 연습해요</small>
+          </span>
+          <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
       </div>
     </div>
   </section>
@@ -105,6 +124,7 @@
           <span class="menu-text">
             <b>단어 선 <em class="badge">추천</em></b>
             <small>일본어 단어를 먼저 보고, 탭하면 뜻이 나와요</small>
+            <small id="lw-resume" class="resume-hint"></small>
           </span>
           <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
         </button>
@@ -113,6 +133,7 @@
           <span class="menu-text">
             <b>뜻 선</b>
             <small>한국어 뜻을 먼저 보고, 탭하면 단어가 나와요</small>
+            <small id="lm-resume" class="resume-hint"></small>
           </span>
           <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
         </button>
@@ -122,33 +143,45 @@
     <!-- 1-2. 플래시카드 학습 화면 -->
     <div id="learn-card-screen" class="learn-card-screen" style="display: none;">
       <div class="learn-top-bar">
-        <button class="sub-back-btn" onclick="showLearnModeSelect()">
+        <button class="sub-back-btn" onclick="backFromCards()">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 6-6 6 6 6"/></svg>
           방식 변경
         </button>
-        <div class="mode-tag-pill" id="current-learn-tag">단어 선</div>
+        <div class="top-right">
+          <button class="text-link" onclick="restartLearn()">처음부터</button>
+          <div class="mode-tag-pill" id="current-learn-tag">단어 선</div>
+        </div>
       </div>
 
       <div class="progress-wrap">
         <div class="progress-text-row">
-          <span>진행</span>
-          <b id="learn-progress">1 / 0</b>
+          <span>진행 <b id="learn-progress">1 / 0</b></span>
+          <label class="skip-toggle">
+            <input type="checkbox" id="skip-memo" onchange="setSkipMemorized(this.checked)">
+            <span>외운 역 건너뛰기 <em id="memo-count-label">0</em></span>
+            <i class="mini-switch" aria-hidden="true"></i>
+          </label>
         </div>
         <div class="progress-bar-bg">
           <div id="learn-progress-bar" class="progress-bar-fill"></div>
         </div>
       </div>
 
-      <div class="flashcard-container" onclick="toggleCard()">
+      <div id="flashcard" class="flashcard-container" onclick="toggleCard()">
         <div class="card-header-bar">
           <span class="eki-id">
             <span class="eki-num" id="eki-num" aria-hidden="true"><small>JL</small>001</span>
             <span class="card-tag" id="card-tag-label">일본어 단어</span>
           </span>
+          <span class="card-actions">
+          <button id="memo-btn" class="memo-btn" onclick="toggleMemorized(event)" title="외웠어요 (M)">외웠어요</button>
           <button class="card-audio-btn" onclick="playCurrentAudio(event)" title="발음 듣기 (Enter)" aria-label="발음 듣기">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>
           </button>
+          </span>
         </div>
+
+        <span class="eki-stamp" aria-hidden="true"><b>済</b><small>외움</small></span>
 
         <div class="card-center-content">
           <div id="card-main" class="card-main-text">-</div>
@@ -158,6 +191,7 @@
         <div id="card-answer-box" class="card-answer-box" style="display: none;">
           <div class="answer-divider"></div>
           <div id="card-answer-text" class="card-answer-text">뜻</div>
+          <div id="card-answer-sub" class="card-answer-sub"></div>
         </div>
 
         <div class="card-footer-hint">
@@ -196,6 +230,7 @@
         <span><kbd>Space</kbd> 뒤집기</span>
         <span><kbd>←</kbd><kbd>→</kbd> 이동</span>
         <span><kbd>Enter</kbd> 발음</span>
+        <span><kbd>M</kbd> 외움</span>
       </div>
     </div>
   </section>
@@ -206,6 +241,7 @@
       <span class="stat"><i class="dot dot-correct"></i>통과 <b class="stats-badge text-correct" id="quiz-pass-count">0</b></span>
       <span class="stat"><i class="dot dot-wrong"></i>틀림 <b class="stats-badge text-wrong" id="quiz-fail-count">0</b></span>
       <span class="stat stat-remain">남은 문제 <b class="stats-badge" id="quiz-remain-count">0</b></span>
+      <button class="text-link" onclick="restartQuiz()">새로 섞기</button>
     </div>
 
     <div class="quiz-question-box">
@@ -255,6 +291,154 @@
       <button id="review-next-btn" class="btn btn-full" style="display:none;" onclick="nextReviewQuestion()">다음 문제</button>
     </div>
   </section>
+
+  <!-- 4. 한자 읽기 (요미가나) -->
+  <section id="reading-section" class="view-section">
+    <!-- 4-1. 한자 읽기 노선 -->
+    <div id="reading-home" class="mode-select-wrap">
+      <div class="select-header">
+        <h2>한자 읽기 노선</h2>
+        <p>한자어 <b id="reading-total">0</b>개의 요미가나만 따로 연습해요.</p>
+      </div>
+
+      <div class="mini-board">
+        <span><i class="dot dot-correct"></i>읽기 통과 <b id="rd-pass">0</b></span>
+        <span><i class="dot dot-wrong"></i>읽기 틀림 <b id="rd-fail">0</b></span>
+        <span class="mb-right">외운 카드 <b id="rd-memo">0</b></span>
+      </div>
+
+      <div class="scope-row">
+        <span class="scope-label">범위</span>
+        <div class="sub-controls scope">
+          <button id="rscope-all" class="pill-btn active" onclick="setReadingScope('all')">전체 <span class="pill-count" id="rscope-all-count">0</span></button>
+          <button id="rscope-wrong" class="pill-btn" onclick="setReadingScope('wrong')">틀린 읽기만 <span class="pill-count" id="rscope-wrong-count">0</span></button>
+        </div>
+      </div>
+
+      <div class="menu-list platforms">
+        <button class="menu-item" onclick="startReadingCards()">
+          <span class="eki-num platform" aria-hidden="true">1<small>番線</small></span>
+          <span class="menu-text">
+            <b>읽기 카드</b>
+            <small>한자를 보고 요미가나를 떠올린 뒤 탭해서 확인해요</small>
+            <small id="rcard-resume" class="resume-hint"></small>
+          </span>
+          <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
+        <button class="menu-item" onclick="startReadingQuiz('read')">
+          <span class="eki-num platform" aria-hidden="true">2<small>番線</small></span>
+          <span class="menu-text">
+            <b>읽기 퀴즈 <em class="badge">한자 → 요미가나</em></b>
+            <small>JLPT 한자읽기처럼 헷갈리는 발음 중에서 골라요</small>
+            <small id="rq-read-resume" class="resume-hint"></small>
+          </span>
+          <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
+        <button class="menu-item" onclick="startReadingQuiz('write')">
+          <span class="eki-num platform" aria-hidden="true">3<small>番線</small></span>
+          <span class="menu-text">
+            <b>표기 퀴즈 <em class="badge">요미가나 → 한자</em></b>
+            <small>발음을 보고 맞는 한자를 골라요 (동음이의어 포함)</small>
+            <small id="rq-write-resume" class="resume-hint"></small>
+          </span>
+          <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- 4-2. 읽기/표기 퀴즈 -->
+    <div id="rquiz-screen" class="rquiz-screen" style="display: none;">
+      <div class="learn-top-bar">
+        <button class="sub-back-btn" onclick="showReadingHome()">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 6-6 6 6 6"/></svg>
+          노선으로
+        </button>
+        <div class="mode-tag-pill" id="rq-tag">2番線 · 읽기</div>
+      </div>
+
+      <div class="stats-bar">
+        <span class="stat"><i class="dot dot-correct"></i>통과 <b class="stats-badge" id="rq-pass">0</b></span>
+        <span class="stat"><i class="dot dot-wrong"></i>틀림 <b class="stats-badge" id="rq-fail">0</b></span>
+        <span class="stat stat-remain">남은 문제 <b class="stats-badge" id="rq-remain">0</b></span>
+        <button class="text-link" onclick="restartReadingQuiz()">새로 섞기</button>
+      </div>
+
+      <div class="quiz-question-box">
+        <div class="quiz-sub" id="rq-label">다음 한자의 읽는 법은?</div>
+        <div class="quiz-target" id="rq-question">-</div>
+        <div class="quiz-hint" id="rq-hint"></div>
+      </div>
+
+      <div class="quiz-options" id="rq-options"></div>
+
+      <div id="rq-result-banner" class="result-banner">
+        <div id="rq-result-text" class="result-title">통과</div>
+        <div id="rq-result-detail" class="detail"></div>
+      </div>
+
+      <button id="rq-next-btn" class="btn btn-full" style="display:none;" onclick="nextReadingQuestion()">다음 문제</button>
+    </div>
+
+    <!-- 4-3. 종점 도착 -->
+    <div id="rquiz-done" class="rquiz-done" style="display: none;">
+      <div class="progress-card done-board">
+        <p class="pc-label"><i class="lamp" aria-hidden="true"></i>終点 · 종점 도착</p>
+        <p class="done-title" id="rq-done-title">모든 문제를 풀었어요</p>
+        <div class="pc-stats">
+          <span><i class="dot dot-correct"></i>이번 통과 <b id="rq-done-pass">0</b></span>
+          <span><i class="dot dot-wrong"></i>이번 틀림 <b id="rq-done-fail">0</b></span>
+        </div>
+      </div>
+      <button id="rq-done-wrong" class="btn btn-full" onclick="retryWrongReadings()">틀린 읽기만 다시 풀기</button>
+      <button class="btn btn-full btn-ghost" onclick="restartReadingQuiz()">처음부터 다시</button>
+      <button class="btn btn-full btn-ghost" onclick="showReadingHome()">노선으로 돌아가기</button>
+    </div>
+  </section>
+</div>
+
+<!-- 기록 관리 팝업 -->
+<div id="records-modal" class="modal" hidden>
+  <div class="modal-backdrop" onclick="closeRecordsModal()"></div>
+  <div class="modal-sheet records-sheet" role="dialog" aria-modal="true" aria-labelledby="records-title">
+    <button class="modal-close" onclick="closeRecordsModal()" aria-label="닫기">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg>
+    </button>
+    <h2 id="records-title">기록 관리</h2>
+    <p class="modal-sub" id="records-status">이 기기에 자동 저장 중</p>
+
+    <div class="records-summary">
+      <div><span>뜻 퀴즈</span><b id="rec-mean">0 / 0</b></div>
+      <div><span>읽기 퀴즈</span><b id="rec-read">0 / 0</b></div>
+      <div><span>외운 카드</span><b id="rec-memo">0</b></div>
+    </div>
+
+    <p class="records-group">백업 <small>휴대폰을 바꾸거나 브라우저 기록을 지워도 되살릴 수 있어요</small></p>
+    <div class="records-grid">
+      <button class="rec-btn" onclick="downloadBackup()">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></svg>
+        백업 파일 저장
+      </button>
+      <button class="rec-btn" onclick="document.getElementById('backup-file').click()">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V9"/><path d="m7 14 5-5 5 5"/><path d="M5 4h14"/></svg>
+        백업 파일 불러오기
+      </button>
+      <button class="rec-btn" onclick="copyBackupCode()">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+        <span id="copy-code-label">백업 코드 복사</span>
+      </button>
+      <button class="rec-btn" onclick="toggleCodeRestore()">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h16"/><path d="M12 4v16"/></svg>
+        코드로 복원
+      </button>
+    </div>
+    <input type="file" id="backup-file" accept=".json,application/json" hidden onchange="restoreBackupFile(this)">
+    <div id="code-restore" class="code-restore" hidden>
+      <textarea id="restore-code" rows="3" placeholder="복사해 둔 백업 코드를 붙여 넣으세요"></textarea>
+      <button class="btn btn-full" onclick="restoreFromCode()">이 코드로 복원</button>
+    </div>
+
+    <button class="danger-link" onclick="resetProgress()">모든 기록 초기화</button>
+  </div>
 </div>
 
 <!-- QR코드 팝업 -->
@@ -287,9 +471,21 @@
   </div>
 </div>
 
+<!-- 앱 안 브라우저(네이버·카카오톡 등) 안내 -->
+<div id="inapp-banner" class="inapp-banner" role="dialog" aria-live="polite" hidden>
+  <button class="inapp-close" onclick="hideInAppBanner()" aria-label="닫기">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg>
+  </button>
+  <p class="inapp-label"><i class="lamp" aria-hidden="true"></i>お知らせ · 안내</p>
+  <b id="inapp-title">이 앱에서는 발음이 안 나올 수 있어요</b>
+  <p class="inapp-text" id="inapp-text">Chrome이나 Safari로 열면 발음을 들을 수 있어요. 지금까지의 학습 기록도 함께 옮겨져요.</p>
+  <button id="inapp-open" class="inapp-open" onclick="openExternalBrowser()">Chrome으로 열기</button>
+</div>
+
 <!-- 알림 메시지 -->
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
-<script src="script.js"></script>
+<!-- ?v= 숫자를 바꾸면 휴대폰이 예전 파일(캐시) 대신 새 파일을 받아요 -->
+<script src="script.js?v=20260925c"></script>
 </body>
 </html>

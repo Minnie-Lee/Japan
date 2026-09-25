@@ -942,6 +942,145 @@ function markHangul(el) {
   - 일본어 음성이 없는 기기 / 음성을 지원하지 않는 브라우저 → 안내 메시지
 */
 const tts = { voice: null, voicesLoaded: false, current: null, timer: null };
+
+const UA = navigator.userAgent || '';
+const IS_IOS = /iP(hone|ad|od)/.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const IS_ANDROID = /Android/i.test(UA);
+const IN_APP_BROWSER = /KAKAOTALK|NAVER\(inapp|Instagram|FBAN|FBAV|Line\/|DaumApps|everytimeApp|BAND\//i.test(UA);
+
+function inAppName() {
+  if (/NAVER\(inapp/i.test(UA)) return '네이버 앱';
+  if (/KAKAOTALK/i.test(UA)) return '카카오톡';
+  if (/Instagram/i.test(UA)) return '인스타그램';
+  if (/FBAN|FBAV/i.test(UA)) return '페이스북';
+  if (/DaumApps/i.test(UA)) return '다음 앱';
+  if (/Line\//i.test(UA)) return '라인';
+  if (/BAND\//i.test(UA)) return '밴드';
+  if (/everytimeApp/i.test(UA)) return '에브리타임';
+  return '이 앱';
+}
+
+// '~로 열기' 조사까지 포함 (Chrome은 '크롬'이라 '으로')
+function externalBrowserWithParticle() {
+  return IS_IOS ? 'Safari로' : 'Chrome으로';
+}
+
+/*
+  앱 안 브라우저(네이버·카카오톡 등)에서 Chrome/Safari로 옮겨 열기
+  - 학습 기록도 주소(?p=...)에 담아서 함께 옮김
+  - 카카오톡: 전용 주소, 안드로이드: Chrome 실행(intent), 아이폰: Safari 실행(x-safari-)
+*/
+function externalBrowserUrl() {
+  const base = location.origin + location.pathname;
+  const url = base + (hasAnyRecord() ? '?p=' + encodeProgress() : '');
+
+  let target;
+  if (/KAKAOTALK/i.test(UA)) {
+    target = 'kakaotalk://web/openExternal?url=' + encodeURIComponent(url);
+  } else if (IS_ANDROID) {
+    target = 'intent://' + url.replace(/^https?:\/\//, '') +
+      '#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=' + encodeURIComponent(url) + ';end';
+  } else if (IS_IOS) {
+    target = 'x-safari-' + url;
+  } else {
+    target = url;
+  }
+  return target;
+}
+
+function openExternalBrowser() {
+  location.href = externalBrowserUrl();
+
+  // 앱이 이동을 막으면 직접 여는 방법 안내
+  setTimeout(() => {
+    if (document.visibilityState === 'visible') {
+      showToast(`안 열리면 화면의 메뉴(⋮ 또는 ⋯)에서 '다른 브라우저로 열기'를 눌러 ${externalBrowserWithParticle()} 열어 주세요.`, 7000);
+    }
+  }, 1500);
+}
+
+// reason: 'audio' (발음이 안 나옴) | 'storage' (기록이 지워질 수 있음)
+function showInAppBanner(reason = 'audio') {
+  const el = document.getElementById('inapp-banner');
+  if (!el) return;
+  const app = inAppName();
+  if (reason === 'storage') {
+    document.getElementById('inapp-title').textContent = `${app}에서는 학습 기록이 지워질 수 있어요`;
+    document.getElementById('inapp-text').textContent =
+      `앱 안의 브라우저는 앱을 닫을 때 기록을 지우기도 해요. ${externalBrowserWithParticle()} 열면 기록이 안전하게 남고 발음도 들을 수 있어요. 지금까지의 기록도 함께 옮겨져요.`;
+  } else {
+    document.getElementById('inapp-title').textContent = `${app}에서는 발음이 안 나올 수 있어요`;
+    document.getElementById('inapp-text').textContent =
+      'Chrome이나 Safari로 열면 발음을 들을 수 있어요. 지금까지의 학습 기록도 함께 옮겨져요.';
+  }
+  document.getElementById('inapp-open').textContent = `${externalBrowserWithParticle()} 열기`;
+  el.hidden = false;
+}
+
+function hideInAppBanner() {
+  const el = document.getElementById('inapp-banner');
+  if (el) el.hidden = true;
+}
+
+/*
+  휴대폰 소리 잠금 해제 (첫 터치 때 한 번)
+  - 아이폰: 무음 스위치가 켜져 있어도 소리가 나도록 '재생' 모드로 전환 (Safari 17 이상)
+    + 무음 오디오를 한 번 재생해서 미디어 소리 채널을 깨움
+  - 첫 발음을 터치 안에서 바로 재생해야 하는 모바일 브라우저 규칙도 여기서 충족
+*/
+const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=';
+let mobileAudioUnlocked = false;
+
+function unlockMobileAudio(warmUp) {
+  if (mobileAudioUnlocked) return;
+  mobileAudioUnlocked = true;
+  try {
+    if (navigator.audioSession) navigator.audioSession.type = 'playback';
+  } catch (e) { /* 지원 안 하는 브라우저 */ }
+  try {
+    const a = new Audio(SILENT_WAV);
+    a.setAttribute('playsinline', '');
+    const p = a.play();
+    if (p && p.catch) p.catch(() => {});
+  } catch (e) { /* 무시 */ }
+  try {
+    // 빈 발음을 한 번 재생해서 음성 엔진을 깨움 (아이폰·안드로이드 첫 재생 누락 방지)
+    // 첫 터치가 발음 버튼이면 곧바로 진짜 발음이 나오므로 생략
+    if (warmUp && ttsSupported()) {
+      const warm = new SpeechSynthesisUtterance(' ');
+      warm.volume = 0;
+      warm.lang = 'ja-JP';
+      window.speechSynthesis.speak(warm);
+    }
+  } catch (e) { /* 무시 */ }
+}
+
+// 어디든 처음 터치하는 순간 미리 잠금 해제
+function onFirstInteraction(e) {
+  ['touchend', 'click', 'keydown'].forEach(type => document.removeEventListener(type, onFirstInteraction, true));
+  const onAudioButton = e.target && e.target.closest && e.target.closest('.card-audio-btn');
+  const isEnterOnCard = e.type === 'keydown';
+  unlockMobileAudio(!onAudioButton && !isEnterOnCard);
+}
+['touchend', 'click', 'keydown'].forEach(type => {
+  document.addEventListener(type, onFirstInteraction, true);
+});
+
+// 소리가 안 날 때 원인별 안내
+function silentReason() {
+  const voices = ttsSupported() ? window.speechSynthesis.getVoices() : [];
+  if (IN_APP_BROWSER) {
+    return '카카오톡 같은 앱 안의 브라우저에서는 발음이 안 나올 수 있어요. 메뉴(⋮)에서 "다른 브라우저로 열기"를 눌러 Chrome이나 Safari로 열어 주세요.';
+  }
+  if (!voices.length) return '이 브라우저에서는 발음 기능을 쓸 수 없어요. Chrome이나 Safari로 열어 주세요.';
+  if (!getJapaneseVoices().length) {
+    return IS_ANDROID
+      ? '일본어 음성이 없어요. 설정 > 일반 관리 > 텍스트 음성 변환(TTS)에서 일본어 음성 데이터를 설치해 주세요.'
+      : '이 기기에 일본어 음성이 없어요. 기기 설정에서 일본어 음성을 추가해 주세요.';
+  }
+  if (IS_IOS) return '소리가 안 나면 아이폰 옆의 무음 스위치를 끄고 볼륨을 올려 주세요.';
+  return '소리가 안 나면 미디어 볼륨을 올려 주세요.';
+}
 const JA_VOICE_PREFERENCE = ['Kyoko', 'O-Ren', 'Otoya', 'Nanami', 'Google 日本語', 'Haruka', 'Ayumi', 'Ichiro', 'Sayaka'];
 
 function ttsSupported() {
@@ -987,13 +1126,15 @@ function setAudioButtonPlaying(on) {
 function speakJapanese(text, retryVoice) {
   if (!text) return;
   if (!ttsSupported()) {
-    showToast('이 브라우저는 음성 재생을 지원하지 않아요. Chrome이나 Safari에서 열어 주세요.');
+    if (IN_APP_BROWSER) showInAppBanner();
+    else showToast('이 브라우저는 음성 재생을 지원하지 않아요. Chrome이나 Safari에서 열어 주세요.');
     return;
   }
   const synth = window.speechSynthesis;
+  unlockMobileAudio(false);
   if (!tts.voice) pickJapaneseVoice();
   if (tts.voicesLoaded && !tts.voice && retryVoice === undefined) {
-    showToast('이 기기에 일본어 음성이 없어요. 기기 설정에서 일본어 음성(TTS)을 추가해 주세요.');
+    showToast(silentReason());
     // 목소리 지정 없이도 재생되는 기기가 있어서 시도는 계속함
   }
 
@@ -1036,14 +1177,16 @@ function speakJapanese(text, retryVoice) {
     tts.timer = setTimeout(() => {
       if (tts.current === u && !synth.speaking) {
         finish();
-        showToast('소리가 나지 않나요? 무음 모드와 볼륨을 확인해 주세요.');
+        if (IN_APP_BROWSER) showInAppBanner();
+        else showToast(silentReason());
       }
     }, 2500);
   };
 
   if (synth.speaking || synth.pending) {
     synth.cancel();
-    setTimeout(start, 80); // Chrome에서 cancel 직후 바로 재생하면 소리가 씹힘
+    if (IS_IOS) start();          // 아이폰: 터치 안에서 바로 재생해야 함
+    else setTimeout(start, 80);   // Chrome: cancel 직후 바로 재생하면 소리가 씹힘
   } else {
     start();
   }
@@ -1073,7 +1216,12 @@ function switchView(view) {
     document.getElementById('review-section').classList.add('active');
     titleEl.textContent = "집중 복습";
     initReview();
+  } else if (view === 'reading') {
+    document.getElementById('reading-section').classList.add('active');
+    titleEl.textContent = "한자 읽기";
+    showReadingHome();
   }
+  window.scrollTo(0, 0);
 }
 
 function updateAllStats() {
@@ -1107,8 +1255,11 @@ function updateAllStats() {
       ? '퀴즈를 풀면 여기에 진행률이 쌓여요'
       : `${done} / ${WORD_DATA.length} 단어 풀이 · 이 기기에 자동 저장`;
   }
-  const resetBtn = document.getElementById('home-reset-btn');
-  if (resetBtn) resetBtn.hidden = passCount + failCount === 0;
+  const rd = countReading();
+  document.getElementById('home-read-pass').textContent = rd.pass;
+  document.getElementById('home-read-fail').textContent = rd.fail;
+  document.getElementById('home-memo-count').textContent = memo.mean.size + memo.read.size;
+  renderResume();
 
   // 다른 기기에서 기록이 바뀌었을 때 퀴즈 화면 숫자도 맞춰 줌
   const quizPass = document.getElementById('quiz-pass-count');
@@ -1123,27 +1274,84 @@ function updateAllStats() {
 /* =========================================================
    4. 학습 모드 (방식 선택 후 플래시카드 실행)
    ========================================================= */
-let learnList = [...WORD_DATA];
+const KANJI_RE = /[㐀-鿿豈-﫿々]/;
+// 한자가 들어간 단어만 (요미가나 연습용)
+const READING_INDICES = WORD_DATA.map((_, i) => i)
+  .filter(i => KANJI_RE.test(WORD_DATA[i].kanji) && WORD_DATA[i].reading !== WORD_DATA[i].kanji);
+const LEARN_TAGS = { word: '1番線 · 단어 선', mean: '2番線 · 뜻 선', reading: '読み · 한자 읽기' };
+
+let learnList = [];
 let learnIndex = 0;
 let learnMode = 'word';
 let cardFlipped = false;
 
+function shuffleArray(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function memoSetFor(mode) {
+  return mode === 'reading' ? memo.read : memo.mean;
+}
+
+function readingList(scope) {
+  return scope === 'wrong' ? READING_INDICES.filter(i => readStatus[i].failedOnce) : READING_INDICES.slice();
+}
+
+function baseOrder(mode) {
+  return mode === 'reading' ? readingList(readingScope) : WORD_DATA.map((_, i) => i);
+}
+
+// 카드 모드별 '어디까지 봤는지' (순서 + 위치)를 기억
+function getLearnSession(mode) {
+  sessions.learn = sessions.learn || {};
+  let s = sessions.learn[mode];
+  const scope = mode === 'reading' ? readingScope : 'all';
+  const valid = s && s.scope === scope && Array.isArray(s.order) && s.order.length &&
+    s.order.every(i => i < WORD_DATA.length);
+  if (!valid) s = sessions.learn[mode] = { order: baseOrder(mode), idx: 0, scope };
+  return s;
+}
+
+function setLastActivity(obj) {
+  sessions.last = obj;
+  saveProgress();
+}
+
 function showLearnModeSelect() {
   document.getElementById('learn-mode-select').style.display = 'flex';
   document.getElementById('learn-card-screen').style.display = 'none';
+  ['word', 'mean'].forEach(mode => {
+    const el = document.getElementById(mode === 'word' ? 'lw-resume' : 'lm-resume');
+    const s = sessions.learn && sessions.learn[mode];
+    if (el) el.textContent = s && s.idx > 0 ? `이어보기 · ${s.idx + 1} / ${s.order.length}번째 역` : '';
+  });
+}
+
+function backFromCards() {
+  if (learnMode === 'reading') switchView('reading');
+  else showLearnModeSelect();
 }
 
 function startLearnSession(mode) {
   learnMode = mode;
+  if (IN_APP_BROWSER && !ttsSupported()) showInAppBanner('audio');
   document.getElementById('learn-mode-select').style.display = 'none';
   document.getElementById('learn-card-screen').style.display = 'flex';
+  document.getElementById('current-learn-tag').textContent = LEARN_TAGS[mode];
+  document.getElementById('app-title').textContent = mode === 'reading' ? '한자 읽기' : '단어 학습';
 
-  document.getElementById('current-learn-tag').textContent = 
-    mode === 'word' ? '1番線 · 단어 선' : '2番線 · 뜻 선';
-
-  learnIndex = 0;
+  const s = getLearnSession(mode);
+  learnList = s.order.map(i => ({ ...WORD_DATA[i], originalIndex: i }));
+  learnIndex = Math.min(Math.max(s.idx || 0, 0), learnList.length - 1);
   cardFlipped = false;
+  document.getElementById('skip-memo').checked = skipMemorized;
   updateLearnCard();
+  if (learnIndex > 0) showToast(`지난번에 보던 ${learnIndex + 1}번째 역부터 이어서 봐요`);
+  setLastActivity({ kind: 'learn', mode });
 }
 
 function updateLearnCard() {
@@ -1160,24 +1368,52 @@ function updateLearnCard() {
   const subEl = document.getElementById('card-sub');
   const answerBox = document.getElementById('card-answer-box');
   const answerText = document.getElementById('card-answer-text');
+  const answerSub = document.getElementById('card-answer-sub');
   const hintText = document.getElementById('card-hint-text');
+  const hasReading = item.reading !== item.kanji;
 
   if (learnMode === 'word') {
     tagEl.textContent = "일본어 단어";
     mainEl.textContent = item.kanji;
-    subEl.textContent = item.reading !== item.kanji ? item.reading : '';
+    subEl.textContent = hasReading ? item.reading : '';
     answerText.textContent = item.mean;
-  } else {
+    answerSub.textContent = '';
+  } else if (learnMode === 'mean') {
     tagEl.textContent = "한국어 뜻";
     mainEl.textContent = item.mean;
     subEl.textContent = '';
-    answerText.textContent = `${item.kanji} (${item.reading})`;
+    answerText.textContent = item.kanji;
+    answerSub.textContent = hasReading ? item.reading : '';
+  } else {
+    // 한자 읽기: 요미가나가 정답이므로 위에 표시하지 않음
+    tagEl.textContent = "한자 → 요미가나";
+    mainEl.textContent = item.kanji;
+    subEl.textContent = '';
+    answerText.textContent = item.reading;
+    answerSub.textContent = item.mean;
   }
+  answerText.classList.toggle('ja', learnMode !== 'word');
 
   answerBox.style.display = cardFlipped ? 'block' : 'none';
   hintText.textContent = cardFlipped ? "탭해서 다시 가리기" : "탭해서 정답 보기";
   markHangul(mainEl);
   updateStationSign();
+
+  // 외웠어요 표시
+  const memorized = memoSetFor(learnMode).has(item.originalIndex);
+  document.getElementById('flashcard').classList.toggle('is-memo', memorized);
+  const memoBtn = document.getElementById('memo-btn');
+  memoBtn.classList.toggle('on', memorized);
+  memoBtn.textContent = memorized ? '외움 ✓' : '외웠어요';
+  const set = memoSetFor(learnMode);
+  document.getElementById('memo-count-label').textContent = learnList.filter(w => set.has(w.originalIndex)).length;
+
+  // 지금 위치 저장 (강제 종료해도 여기서 이어짐)
+  const s = sessions.learn && sessions.learn[learnMode];
+  if (s) {
+    s.idx = learnIndex;
+    saveProgress();
+  }
 }
 
 // 역 표지판: 역 번호 + 이전 역 / 다음 역 (정답이 미리 보이지 않도록 '문제 쪽'만 표시)
@@ -1189,7 +1425,7 @@ function updateStationSign() {
 
   const prev = learnList[learnIndex - 1];
   const next = learnList[learnIndex + 1];
-  const front = w => (learnMode === 'word' ? w.kanji : w.mean);
+  const front = w => (learnMode === 'mean' ? w.mean : w.kanji);
   const sub = w => (learnMode === 'word' && w.reading !== w.kanji ? w.reading : '');
 
   document.getElementById('eki-prev').textContent = prev ? '← ' + front(prev) : '';
@@ -1210,27 +1446,70 @@ function toggleCard() {
   hintText.textContent = cardFlipped ? "탭해서 다시 가리기" : "탭해서 정답 보기";
 }
 
-function prevCard() {
-  if (learnIndex > 0) {
-    learnIndex--;
-    cardFlipped = false;
-    updateLearnCard();
+// 다음/이전 역으로 (외운 역 건너뛰기가 켜져 있으면 외운 카드는 지나감)
+function stepCard(dir) {
+  let i = learnIndex + dir;
+  if (skipMemorized) {
+    const set = memoSetFor(learnMode);
+    while (i >= 0 && i < learnList.length && set.has(learnList[i].originalIndex)) i += dir;
   }
+  if (i < 0 || i >= learnList.length) {
+    if (dir > 0) showToast(skipMemorized ? '남은 역이 없어요. 모두 외웠어요!' : '여기가 종점이에요');
+    return false;
+  }
+  learnIndex = i;
+  cardFlipped = false;
+  updateLearnCard();
+  return true;
 }
 
-function nextCard() {
-  if (learnIndex < learnList.length - 1) {
-    learnIndex++;
-    cardFlipped = false;
-    updateLearnCard();
-  }
-}
+function prevCard() { stepCard(-1); }
+function nextCard() { stepCard(1); }
 
 function shuffleLearn() {
-  learnList.sort(() => Math.random() - 0.5);
+  const s = getLearnSession(learnMode);
+  s.order = shuffleArray(baseOrder(learnMode));
+  s.idx = 0;
+  learnList = s.order.map(i => ({ ...WORD_DATA[i], originalIndex: i }));
   learnIndex = 0;
   cardFlipped = false;
   updateLearnCard();
+  if (skipMemorized && memoSetFor(learnMode).has(learnList[0].originalIndex)) stepCard(1);
+  showToast('순서를 섞었어요');
+}
+
+function restartLearn() {
+  const s = getLearnSession(learnMode);
+  s.order = baseOrder(learnMode);
+  s.idx = 0;
+  learnList = s.order.map(i => ({ ...WORD_DATA[i], originalIndex: i }));
+  learnIndex = 0;
+  cardFlipped = false;
+  updateLearnCard();
+  if (skipMemorized && memoSetFor(learnMode).has(learnList[0].originalIndex)) stepCard(1);
+  showToast('첫 번째 역부터 순서대로 다시 시작해요');
+}
+
+function toggleMemorized(e) {
+  if (e) e.stopPropagation();
+  const item = learnList[learnIndex];
+  if (!item) return;
+  const set = memoSetFor(learnMode);
+  const i = item.originalIndex;
+  if (set.has(i)) set.delete(i);
+  else set.add(i);
+  updateLearnCard();
+  updateAllStats();
+  if (set.has(i) && skipMemorized) setTimeout(() => stepCard(1), 450);
+}
+
+function setSkipMemorized(on) {
+  skipMemorized = on;
+  saveProgress();
+  const item = learnList[learnIndex];
+  if (on && item && memoSetFor(learnMode).has(item.originalIndex)) {
+    if (!stepCard(1)) stepCard(-1);
+  }
 }
 
 function playCurrentAudio(e) {
@@ -1240,15 +1519,16 @@ function playCurrentAudio(e) {
 }
 
 window.addEventListener('keydown', (e) => {
-  // QR 팝업이 열려 있으면 학습 단축키 대신 팝업 닫기만 처리
-  const qrModal = document.getElementById('qr-modal');
-  if (qrModal && !qrModal.hidden) {
-    if (e.key === 'Escape') closeQrModal();
+  // 팝업이 열려 있으면 학습 단축키 대신 팝업 닫기만 처리
+  const openModal = document.querySelector('.modal:not([hidden])');
+  if (openModal) {
+    if (e.key === 'Escape') { closeQrModal(); closeRecordsModal(); }
     return;
   }
+  if (e.target && /INPUT|TEXTAREA/.test(e.target.tagName)) return;
 
   const cardScreen = document.getElementById('learn-card-screen');
-  if (cardScreen && cardScreen.style.display === 'flex') {
+  if (cardScreen && cardScreen.style.display === 'flex' && document.body.dataset.view === 'learn') {
     if (e.code === 'Space') {
       e.preventDefault();
       toggleCard();
@@ -1258,6 +1538,8 @@ window.addEventListener('keydown', (e) => {
       prevCard();
     } else if (e.code === 'Enter') {
       playCurrentAudio();
+    } else if (e.code === 'KeyM') {
+      toggleMemorized();
     }
   }
 });
@@ -1271,10 +1553,35 @@ let currentQuizType = 'wordToMean';
 let quizAnswerIndex = -1;
 
 function initQuiz() {
-  quizPool = WORD_DATA.map((item, index) => ({ ...item, originalIndex: index }));
-  quizPool.sort(() => Math.random() - 0.5);
+  // 지난번에 풀던 문제가 남아 있으면 이어서
+  const saved = sessions.quiz && Array.isArray(sessions.quiz.pool)
+    ? sessions.quiz.pool.filter(i => i < WORD_DATA.length) : [];
+  if (saved.length) {
+    quizPool = saved.map(i => ({ ...WORD_DATA[i], originalIndex: i }));
+    if (saved.length < WORD_DATA.length) showToast(`지난번에 풀던 곳부터 이어서 풀어요 (남은 ${saved.length}문제)`);
+  } else {
+    newQuizPool();
+  }
   updateQuizStats();
   loadNextQuiz();
+  setLastActivity({ kind: 'quiz' });
+}
+
+function newQuizPool() {
+  quizPool = shuffleArray(WORD_DATA.map((item, index) => ({ ...item, originalIndex: index })));
+  persistQuizPool();
+}
+
+function persistQuizPool() {
+  sessions.quiz = { pool: quizPool.map(q => q.originalIndex) };
+  saveProgress();
+}
+
+function restartQuiz() {
+  newQuizPool();
+  updateQuizStats();
+  loadNextQuiz();
+  showToast('문제를 새로 섞었어요');
 }
 
 function updateQuizStats() {
@@ -1293,12 +1600,15 @@ function updateQuizStats() {
 
 function loadNextQuiz() {
   if (quizPool.length === 0) {
-    alert("모든 퀴즈를 완료했습니다! 복습 탭에서 오답을 확인해보세요.");
+    sessions.quiz = null;
+    saveProgress();
+    showToast('모든 퀴즈를 풀었어요! 복습에서 틀린 단어를 확인해 보세요.', 4000);
     switchView('review');
     return;
   }
 
-  currentQuizItem = quizPool.pop();
+  // 답을 고르기 전까지는 목록에서 빼지 않음 (중간에 꺼도 이 문제부터 다시)
+  currentQuizItem = quizPool[quizPool.length - 1];
   updateQuizStats();
 
   currentQuizType = Math.random() > 0.5 ? 'wordToMean' : 'meanToWord';
@@ -1383,6 +1693,8 @@ function checkQuizAnswer(selectedIdx, selectedBtn) {
     wordStatus[origIdx].passed = false;
   }
 
+  quizPool.pop();
+  persistQuizPool();
   updateQuizStats();
   nextBtn.style.display = 'block';
 }
@@ -1558,9 +1870,10 @@ function openQrModal() {
     }
   } else {
     const { pass, fail } = countProgress();
-    // 로그인했다면 휴대폰에서 같은 계정으로 로그인하면 되므로 기록을 QR에 담지 않음
-    progressRow.hidden = pass + fail === 0;
-    document.getElementById('qr-progress-summary').textContent = `통과 ${pass} · 틀림 ${fail}`;
+    const rd = countReading();
+    progressRow.hidden = !hasAnyRecord();
+    document.getElementById('qr-progress-summary').textContent =
+      `뜻 ${pass}/${fail} · 읽기 ${rd.pass}/${rd.fail} · 외움 ${memo.mean.size + memo.read.size}`;
     renderQr();
   }
 
@@ -1625,14 +1938,44 @@ function fallbackCopy(text, done) {
 
 /* =========================================================
    8. 학습 기록 저장 & 불러오기
-   - 이 기기: 브라우저 저장소(localStorage)에 자동 저장
-   - 다른 기기: QR코드 주소(#p...)에 기록을 담아 전달
+   - 저장하는 것: 뜻 퀴즈 통과/틀림, 읽기 퀴즈 통과/틀림, 외운 카드,
+                  카드를 어디까지 봤는지, 퀴즈를 어디까지 풀었는지
+   - 단어 자체(한자|읽기)를 열쇠로 저장 → 단어를 추가·삭제해도 기존 기록 유지
+   - 두 군데에 저장: localStorage(즉시) + IndexedDB(백업 사본)
+     열 때 둘을 합치므로 한쪽이 지워져도 되살아남
+   - 답을 고를 때마다 바로 저장 + 앱이 백그라운드로 갈 때 한 번 더 저장
+     → 강제 종료해도 마지막으로 푼 것까지 남음
+   - 기록은 절대 저절로 지워지지 않음 (합칠 때 '틀림 > 통과 > 안 풂'으로 더 많은 쪽을 남김)
    ========================================================= */
-const STORAGE_KEY = 'jlpt-word-status-v1';
+const SAVE_KEY = 'jlpt-save-v2';
+const LEGACY_KEY = 'jlpt-word-status-v1';
+
+const readStatus = {};
+WORD_DATA.forEach((_, idx) => { readStatus[idx] = { failedOnce: false, passed: false }; });
+const memo = { mean: new Set(), read: new Set() };   // 외운 카드 (단어 번호)
+let sessions = {};           // 카드 위치, 퀴즈 남은 문제, 마지막 학습
+let skipMemorized = false;
+let readingScope = 'all';
+let resetAt = 0;
+let lastSavedAt = null;
+let storagePersisted = false;
+
+function stateOf(st) { return st.failedOnce ? 2 : (st.passed ? 1 : 0); }
+function setStateOf(st, v) { st.failedOnce = v === 2; st.passed = v === 1; }
+
+function wordKey(i) { return WORD_DATA[i].kanji + '|' + WORD_DATA[i].reading; }
+let keyIndexMap = null;
+function keyToIndex(k) {
+  if (!keyIndexMap) {
+    keyIndexMap = new Map();
+    WORD_DATA.forEach((_, i) => keyIndexMap.set(wordKey(i), i));
+  }
+  return keyIndexMap.get(k);
+}
 
 // 단어별 상태: 0 = 안 풂, 1 = 통과, 2 = 틀림
 function getStates() {
-  return WORD_DATA.map((_, i) => (wordStatus[i].failedOnce ? 2 : (wordStatus[i].passed ? 1 : 0)));
+  return WORD_DATA.map((_, i) => stateOf(wordStatus[i]));
 }
 
 function countProgress() {
@@ -1641,12 +1984,172 @@ function countProgress() {
   return { pass, fail };
 }
 
-// 기록 → 짧은 문자열  (예: "p911-s3._a.")
-function encodeProgress() {
-  const n = WORD_DATA.length;
-  const states = getStates();
+function countReading() {
+  let pass = 0, fail = 0;
+  READING_INDICES.forEach(i => { const v = stateOf(readStatus[i]); if (v === 1) pass++; else if (v === 2) fail++; });
+  return { pass, fail };
+}
 
-  // 방식 1: 푼 단어만 기록 (앞 단어와의 간격 + 상태 기호)
+function hasAnyRecord() {
+  return WORD_DATA.some((_, i) => stateOf(wordStatus[i]) || stateOf(readStatus[i])) || memo.mean.size > 0 || memo.read.size > 0;
+}
+
+/* ---------- 저장 파일 만들기 / 읽기 ---------- */
+function buildSave() {
+  const words = {};
+  WORD_DATA.forEach((_, i) => {
+    const v = stateOf(wordStatus[i]) | (stateOf(readStatus[i]) << 2) |
+      (memo.mean.has(i) ? 16 : 0) | (memo.read.has(i) ? 32 : 0);
+    if (v) words[wordKey(i)] = v;
+  });
+  return {
+    app: 'jlpt-wordbook', v: 2, n: WORD_DATA.length, savedAt: Date.now(), resetAt,
+    words, sessions, skipMemorized, readingScope,
+  };
+}
+
+// 저장된 기록을 지금 기록에 합침 (기존 기록은 지우지 않음). 바뀐 단어 수를 돌려줌
+function applySave(data, opts = {}) {
+  if (!data || typeof data.words !== 'object') return 0;
+  if (!opts.force && resetAt && (data.savedAt || 0) <= resetAt) return 0;   // 초기화 전 기록은 무시
+  let changed = 0;
+  Object.entries(data.words).forEach(([k, v]) => {
+    const i = keyToIndex(k);
+    if (i === undefined || typeof v !== 'number') return;
+    const before = stateOf(wordStatus[i]) | (stateOf(readStatus[i]) << 2) |
+      (memo.mean.has(i) ? 16 : 0) | (memo.read.has(i) ? 32 : 0);
+    const m = v & 3, r = (v >> 2) & 3;
+    if (m < 3) setStateOf(wordStatus[i], Math.max(stateOf(wordStatus[i]), m));
+    if (r < 3) setStateOf(readStatus[i], Math.max(stateOf(readStatus[i]), r));
+    if (v & 16) memo.mean.add(i);
+    if (v & 32) memo.read.add(i);
+    const after = stateOf(wordStatus[i]) | (stateOf(readStatus[i]) << 2) |
+      (memo.mean.has(i) ? 16 : 0) | (memo.read.has(i) ? 32 : 0);
+    if (after !== before) changed++;
+  });
+  // 카드 위치·퀴즈 진행은 더 최근 것 또는 비어 있을 때만 가져옴
+  const localEmpty = !sessions || Object.keys(sessions).length === 0;
+  if (data.sessions && data.n === WORD_DATA.length && (opts.takeSessions || localEmpty)) {
+    sessions = data.sessions;
+    if (typeof data.skipMemorized === 'boolean') skipMemorized = data.skipMemorized;
+    if (data.readingScope === 'all' || data.readingScope === 'wrong') readingScope = data.readingScope;
+  }
+  if (data.resetAt && data.resetAt > resetAt) resetAt = data.resetAt;
+  return changed;
+}
+
+/* ---------- IndexedDB (백업 사본) ---------- */
+const IDB_NAME = 'jlpt-wordbook';
+const IDB_STORE = 'save';
+
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) { reject(new Error('no indexedDB')); return; }
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbPut(json) {
+  try {
+    const db = await idbOpen();
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).put(json, 'main');
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => db.close();
+  } catch (e) { /* 지원 안 하는 브라우저 */ }
+}
+
+async function idbGet() {
+  try {
+    const db = await idbOpen();
+    return await new Promise(resolve => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const req = tx.objectStore(IDB_STORE).get('main');
+      req.onsuccess = () => { resolve(req.result || null); db.close(); };
+      req.onerror = () => { resolve(null); db.close(); };
+    });
+  } catch (e) {
+    return null;
+  }
+}
+
+/* ---------- 저장 ---------- */
+let idbTimer = null;
+function saveProgress() {
+  const json = JSON.stringify(buildSave());
+  try { localStorage.setItem(SAVE_KEY, json); } catch (e) { /* 개인정보 보호 모드 등 */ }
+  lastSavedAt = new Date();
+  clearTimeout(idbTimer);
+  idbTimer = setTimeout(() => idbPut(json), 400);
+}
+
+// 앱을 닫거나 백그라운드로 보낼 때 바로 두 곳 모두 저장
+function flushSave() {
+  clearTimeout(idbTimer);
+  const json = JSON.stringify(buildSave());
+  try { localStorage.setItem(SAVE_KEY, json); } catch (e) { /* 무시 */ }
+  idbPut(json);
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushSave();
+});
+window.addEventListener('pagehide', flushSave);
+
+// 브라우저가 저장 공간이 부족할 때 기록을 정리하지 않도록 요청
+function requestPersistentStorage() {
+  try {
+    if (!navigator.storage || !navigator.storage.persist || /Firefox/i.test(UA)) return;
+    navigator.storage.persisted().then(already => {
+      if (already) { storagePersisted = true; return; }
+      navigator.storage.persist().then(granted => { storagePersisted = granted; }).catch(() => {});
+    }).catch(() => {});
+  } catch (e) { /* 무시 */ }
+}
+
+/* ---------- 불러오기 ---------- */
+function loadProgress() {
+  let raw = null;
+  try { raw = localStorage.getItem(SAVE_KEY); } catch (e) { return; }
+  if (raw) {
+    try {
+      const data = JSON.parse(raw);
+      resetAt = data.resetAt || 0;
+      applySave(data, { takeSessions: true, force: true });
+      return;
+    } catch (e) { /* 손상된 경우 아래 예전 형식 시도 */ }
+  }
+  // 예전 버전(뜻 퀴즈 기록만 있던 형식)에서 옮겨 오기
+  let legacy = null;
+  try { legacy = localStorage.getItem(LEGACY_KEY); } catch (e) { /* 무시 */ }
+  const result = decodeProgress(legacy);
+  if (result && result.states) {
+    applyStates(result.states, true);
+    saveProgress();
+  }
+}
+
+// IndexedDB 사본과 합치기 (localStorage가 지워졌어도 여기서 되살림)
+async function restoreFromIndexedDB() {
+  const raw = await idbGet();
+  if (!raw) { flushSave(); return; }
+  let data;
+  try { data = JSON.parse(raw); } catch (e) { flushSave(); return; }
+  const localEmpty = !hasAnyRecord();
+  const changed = applySave(data, { takeSessions: localEmpty });
+  if (changed > 0) {
+    updateAllStats();
+    showToast(`저장해 둔 사본에서 기록 ${changed}개를 되살렸어요`, 4000);
+  } else {
+    flushSave();
+  }
+}
+
+/* ---------- QR · 백업 코드용 짧은 문자열 ---------- */
+// 상태 배열 → 짧은 문자열 ('s...' 또는 'b...')
+function encodeStateCode(states) {
   let sparse = '';
   let prev = -1;
   states.forEach((st, i) => {
@@ -1655,42 +2158,34 @@ function encodeProgress() {
     sparse += (gap ? gap.toString(36) : '') + (st === 1 ? '.' : '_');
     prev = i;
   });
-
-  // 방식 2: 모든 단어를 2비트씩 압축 (많이 풀었을 때 더 짧음)
-  const bytes = new Uint8Array(Math.ceil(n / 4));
+  const bytes = new Uint8Array(Math.ceil(states.length / 4));
   states.forEach((st, i) => { bytes[i >> 2] |= st << ((i & 3) * 2); });
   let end = bytes.length;
   while (end > 0 && bytes[end - 1] === 0) end--;
   let bin = '';
   for (let i = 0; i < end; i++) bin += String.fromCharCode(bytes[i]);
   const packed = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-
-  return `p${n}-` + (sparse.length <= packed.length ? 's' + sparse : 'b' + packed);
+  return sparse.length <= packed.length ? 's' + sparse : 'b' + packed;
 }
 
-// 문자열 → 기록 (형식이 틀리거나 단어 수가 다르면 null)
-function decodeProgress(code) {
-  const m = /^p(\d+)-([sb])(.*)$/.exec(code || '');
-  if (!m) return null;
-  const n = WORD_DATA.length;
-  if (Number(m[1]) !== n) return { mismatch: true };
+function decodeStateCode(code, n) {
+  const kind = code[0], body = code.slice(1);
   const states = new Array(n).fill(0);
-
-  if (m[2] === 's') {
+  if (kind === 's') {
     const re = /([0-9a-z]*)([._])/g;
     let tok, idx = -1, consumed = 0;
-    while ((tok = re.exec(m[3])) !== null) {
+    while ((tok = re.exec(body)) !== null) {
       if (tok.index !== consumed) return null;
       consumed = re.lastIndex;
       idx += 1 + (tok[1] ? parseInt(tok[1], 36) : 0);
       if (idx >= n) return null;
       states[idx] = tok[2] === '.' ? 1 : 2;
     }
-    if (consumed !== m[3].length) return null;
-  } else {
+    if (consumed !== body.length) return null;
+  } else if (kind === 'b') {
     let bin;
     try {
-      const b64 = m[3].replace(/-/g, '+').replace(/_/g, '/');
+      const b64 = body.replace(/-/g, '+').replace(/_/g, '/');
       bin = atob(b64 + '==='.slice((b64.length + 3) % 4));
     } catch (e) {
       return null;
@@ -1700,8 +2195,41 @@ function decodeProgress(code) {
       if (st === 3) return null;
       states[i] = st;
     }
+  } else {
+    return null;
   }
-  return { states };
+  return states;
+}
+
+// 모든 기록 → 짧은 문자열 (예: "p911-s3._a.~r...~m...")
+function encodeProgress() {
+  const n = WORD_DATA.length;
+  let out = `p${n}-` + encodeStateCode(getStates());
+  const rs = WORD_DATA.map((_, i) => stateOf(readStatus[i]));
+  if (rs.some(Boolean)) out += '~r' + encodeStateCode(rs);
+  if (memo.mean.size) out += '~m' + encodeStateCode(WORD_DATA.map((_, i) => (memo.mean.has(i) ? 1 : 0)));
+  if (memo.read.size) out += '~y' + encodeStateCode(WORD_DATA.map((_, i) => (memo.read.has(i) ? 1 : 0)));
+  return out;
+}
+
+// 문자열 → 기록 (형식이 틀리면 null, 단어 수가 다르면 mismatch)
+function decodeProgress(code) {
+  const parts = String(code || '').split('~');
+  const m = /^p(\d+)-([sb].*)$/.exec(parts[0]);
+  if (!m) return null;
+  const n = WORD_DATA.length;
+  if (Number(m[1]) !== n) return { mismatch: true };
+  const states = decodeStateCode(m[2], n);
+  if (!states) return null;
+  const out = { states };
+  for (const part of parts.slice(1)) {
+    const st = decodeStateCode(part.slice(1), n);
+    if (!st) return null;
+    if (part[0] === 'r') out.read = st;
+    else if (part[0] === 'm') out.memoMean = st;
+    else if (part[0] === 'y') out.memoRead = st;
+  }
+  return out;
 }
 
 // merge = true 이면 기존 기록과 합침 (틀림 > 통과 > 안 풂 순으로 우선)
@@ -1709,64 +2237,77 @@ function applyStates(states, merge) {
   let changed = 0;
   states.forEach((st, i) => {
     const s = wordStatus[i];
-    const before = s.failedOnce ? 2 : (s.passed ? 1 : 0);
+    const before = stateOf(s);
     const next = merge ? Math.max(before, st) : st;
-    s.failedOnce = next === 2;
-    s.passed = next === 1;
+    setStateOf(s, next);
     if (next !== before) changed++;
   });
   return changed;
 }
 
-function saveProgress() {
-  try {
-    localStorage.setItem(STORAGE_KEY, encodeProgress());
-  } catch (e) { /* 개인정보 보호 모드 등에서는 저장하지 않음 */ }
+// 짧은 문자열로 받은 기록을 모두 합치기
+function applyDecoded(result) {
+  let changed = applyStates(result.states, true);
+  if (result.read) {
+    result.read.forEach((st, i) => {
+      const before = stateOf(readStatus[i]);
+      if (st > before) { setStateOf(readStatus[i], st); changed++; }
+    });
+  }
+  [['memoMean', memo.mean], ['memoRead', memo.read]].forEach(([k, set]) => {
+    if (!result[k]) return;
+    result[k].forEach((v, i) => { if (v && !set.has(i)) { set.add(i); changed++; } });
+  });
+  return changed;
 }
 
-function loadProgress() {
-  let saved = null;
-  try { saved = localStorage.getItem(STORAGE_KEY); } catch (e) { return; }
-  const result = decodeProgress(saved);
-  if (result && result.states) applyStates(result.states, false);
-}
-
-// QR코드로 들어온 기록 불러오기
+// QR코드나 '다른 브라우저로 열기'로 들어온 기록 불러오기
 function importFromUrl() {
-  const code = location.hash.slice(1);
-  if (!code.startsWith('p')) return;
+  const params = new URLSearchParams(location.search);
+  const fromQuery = params.get('p');
+  const code = fromQuery ? fromQuery : location.hash.slice(1);
+  if (!code || !code.startsWith('p')) return;
   const result = decodeProgress(code);
   if (!result) return;
 
   // 새로고침해도 다시 불러오지 않도록 주소에서 기록 부분 제거
-  history.replaceState(null, '', location.pathname + location.search);
+  params.delete('p');
+  const rest = params.toString();
+  history.replaceState(null, '', location.pathname + (rest ? '?' + rest : ''));
 
   if (result.mismatch) {
     showToast('단어 목록이 달라서 학습 기록을 불러오지 못했어요');
     return;
   }
-  const changed = applyStates(result.states, true);
+  const changed = applyDecoded(result);
   saveProgress();
   showToast(changed > 0
-    ? `학습 기록을 불러왔어요 (${changed}개 단어)`
+    ? `학습 기록을 불러왔어요 (${changed}개)`
     : '이미 같은 학습 기록이 저장되어 있어요');
 }
 
 function resetProgress() {
-  if (!confirm('이 기기에 저장된 통과/틀림 기록을 모두 지울까요?')) return;
+  if (!confirm('모든 기록(뜻 퀴즈 · 읽기 퀴즈 · 외운 카드 · 이어보기 위치)을 지울까요?\n지운 기록은 되돌릴 수 없어요.')) return;
   applyStates(new Array(WORD_DATA.length).fill(0), false);
+  WORD_DATA.forEach((_, i) => setStateOf(readStatus[i], 0));
+  memo.mean.clear();
+  memo.read.clear();
+  sessions = {};
+  resetAt = Date.now();
+  flushSave();
   updateAllStats();
+  closeRecordsModal();
   showToast('학습 기록을 초기화했어요');
 }
 
 let toastTimer = null;
-function showToast(message) {
+function showToast(message, duration) {
   const el = document.getElementById('toast');
   if (!el) return;
   el.textContent = message;
   el.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, 2600);
+  toastTimer = setTimeout(() => { el.hidden = true; }, duration || (message.length > 30 ? 5000 : 2600));
 }
 
 /* =========================================================
@@ -2085,11 +2626,449 @@ function showToast(message) {
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /* =========================================================
+   10. 한자 읽기 (요미가나) — 읽기 카드 · 읽기 퀴즈 · 표기 퀴즈
+   ========================================================= */
+const rq = { type: 'read', current: null, answerIndex: -1 };
+
+function showReadingHome() {
+  document.getElementById('reading-home').style.display = 'flex';
+  document.getElementById('rquiz-screen').style.display = 'none';
+  document.getElementById('rquiz-done').style.display = 'none';
+  document.getElementById('app-title').textContent = '한자 읽기';
+  renderReadingHome();
+}
+
+function renderReadingHome() {
+  const rd = countReading();
+  const memoCount = READING_INDICES.filter(i => memo.read.has(i)).length;
+  document.getElementById('reading-total').textContent = READING_INDICES.length;
+  document.getElementById('rd-pass').textContent = rd.pass;
+  document.getElementById('rd-fail').textContent = rd.fail;
+  document.getElementById('rd-memo').textContent = memoCount;
+  document.getElementById('rscope-all-count').textContent = READING_INDICES.length;
+  document.getElementById('rscope-wrong-count').textContent = rd.fail;
+  if (readingScope === 'wrong' && rd.fail === 0) readingScope = 'all';
+  document.getElementById('rscope-all').classList.toggle('active', readingScope === 'all');
+  document.getElementById('rscope-wrong').classList.toggle('active', readingScope === 'wrong');
+
+  const card = sessions.learn && sessions.learn.reading;
+  document.getElementById('rcard-resume').textContent =
+    card && card.scope === readingScope && card.idx > 0 ? `이어보기 · ${card.idx + 1} / ${card.order.length}번째 역` : '';
+  ['read', 'write'].forEach(type => {
+    const q = sessions.rquiz && sessions.rquiz[type];
+    const el = document.getElementById(type === 'read' ? 'rq-read-resume' : 'rq-write-resume');
+    el.textContent = q && q.scope === readingScope && q.pool && q.pool.length && (q.pass + q.fail) > 0
+      ? `이어풀기 · 남은 문제 ${q.pool.length}` : '';
+  });
+}
+
+function setReadingScope(scope) {
+  if (scope === 'wrong' && countReading().fail === 0) {
+    showToast('아직 틀린 읽기가 없어요. 읽기 퀴즈를 먼저 풀어 보세요.');
+    return;
+  }
+  readingScope = scope;
+  saveProgress();
+  renderReadingHome();
+}
+
+function startReadingCards() {
+  if (!readingList(readingScope).length) { showToast('해당하는 단어가 없어요'); return; }
+  switchView('learn');
+  startLearnSession('reading');
+}
+
+function getReadingQuizSession(type, fresh) {
+  sessions.rquiz = sessions.rquiz || {};
+  let q = sessions.rquiz[type];
+  const valid = q && q.scope === readingScope && Array.isArray(q.pool) && q.pool.length &&
+    q.pool.every(i => i < WORD_DATA.length);
+  if (fresh || !valid) {
+    q = sessions.rquiz[type] = { scope: readingScope, pool: shuffleArray(readingList(readingScope)), pass: 0, fail: 0 };
+  }
+  return q;
+}
+
+function startReadingQuiz(type, fresh) {
+  if (document.body.dataset.view !== 'reading') switchView('reading');
+  if (!readingList(readingScope).length) { showToast('풀 문제가 없어요'); return; }
+  rq.type = type;
+  const q = getReadingQuizSession(type, fresh);
+  document.getElementById('reading-home').style.display = 'none';
+  document.getElementById('rquiz-done').style.display = 'none';
+  document.getElementById('rquiz-screen').style.display = 'flex';
+  document.getElementById('rq-tag').textContent = type === 'read' ? '2番線 · 한자 → 요미가나' : '3番線 · 요미가나 → 한자';
+  document.getElementById('app-title').textContent = type === 'read' ? '읽기 퀴즈' : '표기 퀴즈';
+  if (!fresh && q.pass + q.fail > 0) showToast(`지난번에 풀던 곳부터 이어서 풀어요 (남은 ${q.pool.length}문제)`);
+  setLastActivity({ kind: 'rquiz', type });
+  loadReadingQuestion();
+}
+
+function restartReadingQuiz() { startReadingQuiz(rq.type, true); }
+
+function retryWrongReadings() {
+  readingScope = 'wrong';
+  startReadingQuiz(rq.type, true);
+}
+
+function nextReadingQuestion() { loadReadingQuestion(); }
+
+function updateReadingQuizStats() {
+  const q = sessions.rquiz[rq.type];
+  document.getElementById('rq-pass').textContent = q.pass;
+  document.getElementById('rq-fail').textContent = q.fail;
+  document.getElementById('rq-remain').textContent = q.pool.length;
+}
+
+function loadReadingQuestion() {
+  const q = sessions.rquiz[rq.type];
+  if (!q.pool.length) { showReadingDone(); return; }
+  updateReadingQuizStats();
+
+  // 답을 고르기 전까지는 목록에서 빼지 않음 (중간에 꺼도 이 문제부터 다시)
+  const i = q.pool[q.pool.length - 1];
+  const w = WORD_DATA[i];
+  rq.current = i;
+
+  const banner = document.getElementById('rq-result-banner');
+  banner.className = 'result-banner';
+  banner.style.display = '';
+  document.getElementById('rq-next-btn').style.display = 'none';
+
+  const label = document.getElementById('rq-label');
+  const question = document.getElementById('rq-question');
+  const hint = document.getElementById('rq-hint');
+  let correct, options;
+  if (rq.type === 'read') {
+    label.textContent = '다음 한자의 읽는 법으로 알맞은 것은?';
+    question.textContent = w.kanji;
+    hint.textContent = '';
+    correct = w.reading;
+    options = [correct, ...readingDistractors(i)];
+  } else {
+    label.textContent = '다음 요미가나를 한자로 쓰면?';
+    question.textContent = w.reading;
+    hint.textContent = `뜻: ${w.mean}`;   // 동음이의어(郊外/公害 등)를 구별하도록 뜻을 함께 보여 줌
+    correct = w.kanji;
+    options = [correct, ...kanjiDistractors(i)];
+  }
+  question.classList.remove('ko');
+  shuffleArray(options);
+  rq.answerIndex = options.indexOf(correct);
+
+  const box = document.getElementById('rq-options');
+  box.innerHTML = '';
+  options.forEach((opt, idx) => {
+    const btn = document.createElement('button');
+    btn.className = 'option-btn ja';
+    fillOptionButton(btn, idx, opt);
+    btn.onclick = () => checkReadingAnswer(idx, btn);
+    box.appendChild(btn);
+  });
+}
+
+function checkReadingAnswer(idx, btn) {
+  const buttons = document.querySelectorAll('#rq-options .option-btn');
+  buttons.forEach(b => { b.disabled = true; });
+  const q = sessions.rquiz[rq.type];
+  const i = rq.current;
+  const w = WORD_DATA[i];
+  const banner = document.getElementById('rq-result-banner');
+
+  if (idx === rq.answerIndex) {
+    btn.classList.add('correct');
+    banner.className = 'result-banner pass';
+    document.getElementById('rq-result-text').textContent = '통과';
+    if (!readStatus[i].failedOnce) readStatus[i].passed = true;
+    q.pass++;
+  } else {
+    btn.classList.add('wrong');
+    buttons[rq.answerIndex].classList.add('correct');
+    banner.className = 'result-banner fail';
+    document.getElementById('rq-result-text').textContent = '틀림';
+    readStatus[i].failedOnce = true;
+    readStatus[i].passed = false;
+    q.fail++;
+  }
+  document.getElementById('rq-result-detail').textContent = `${w.kanji} [${w.reading}] · ${w.mean}`;
+
+  q.pool.pop();
+  updateReadingQuizStats();
+  updateAllStats();   // 저장 포함
+  document.getElementById('rq-next-btn').style.display = 'block';
+}
+
+function showReadingDone() {
+  const q = sessions.rquiz[rq.type];
+  document.getElementById('rquiz-screen').style.display = 'none';
+  document.getElementById('rquiz-done').style.display = 'flex';
+  document.getElementById('rq-done-title').textContent =
+    q.scope === 'wrong' ? '틀린 읽기를 모두 다시 풀었어요' : `${rq.type === 'read' ? '읽기' : '표기'} 퀴즈를 모두 풀었어요`;
+  document.getElementById('rq-done-pass').textContent = q.pass;
+  document.getElementById('rq-done-fail').textContent = q.fail;
+  document.getElementById('rq-done-wrong').hidden = countReading().fail === 0;
+}
+
+/* ---------- 헷갈리는 오답 만들기 ---------- */
+// 탁음·반탁음 바꾸기 (か↔が, は↔ば↔ぱ …)
+const VOICE_TOGGLE = (() => {
+  const map = {};
+  const pairs = ['かが', 'きぎ', 'くぐ', 'けげ', 'こご', 'さざ', 'しじ', 'すず', 'せぜ', 'そぞ', 'ただ', 'てで', 'とど'];
+  pairs.forEach(([a, b]) => { map[a] = [b]; map[b] = [a]; });
+  ['はばぱ', 'ひびぴ', 'ふぶぷ', 'へべぺ', 'ほぼぽ'].forEach(([a, b, c]) => {
+    map[a] = [b, c]; map[b] = [a, c]; map[c] = [a, b];
+  });
+  return map;
+})();
+const O_ROW = 'こそとのほもよろごぞどぼぽょ';
+const U_ROW = 'くすつぬふむゆるぐずぶぷゅ';
+const E_ROW = 'けせてねへめれげぜでべぺ';
+const TSU_BEFORE = 'かきくけこさしすせそたちつてとぱぴぷぺぽ';
+const SMALL_Y = { 'ゃ': ['ゅ', 'ょ'], 'ゅ': ['ゃ', 'ょ'], 'ょ': ['ゃ', 'ゅ'] };
+
+// 한자에 해당하는 읽기 부분 (앞뒤 오쿠리가나는 바꾸지 않음: 相次ぐ → あいつ|ぐ)
+function kanjiReadingSpan(w) {
+  const k = w.kanji, r = w.reading;
+  let pre = 0;
+  while (pre < k.length && pre < r.length && k[pre] === r[pre] && !KANJI_RE.test(k[pre])) pre++;
+  let suf = 0;
+  while (suf < k.length - pre && suf < r.length - pre &&
+         k[k.length - 1 - suf] === r[r.length - 1 - suf] && !KANJI_RE.test(k[k.length - 1 - suf])) suf++;
+  return [pre, r.length - suf];
+}
+
+// JLPT 한자읽기처럼 장음·촉음·탁음·요음만 살짝 다른 가짜 읽기
+function readingVariants(w) {
+  const r = w.reading;
+  const [a, b] = kanjiReadingSpan(w);
+  const out = new Set();
+  const put = v => {
+    if (v === r || !v) return;
+    if (/^[っゃゅょんー]/.test(v)) return;
+    if (/っ[あいうえおなにぬねのまみむめもやゆよらりるれろわをんっゃゅょ]|っ$/.test(v)) return;
+    if (/(.)\1\1|うう|うっ|えいっ|をっ|[ゃゅょ]う[ゃゅょ]|ゃう/.test(v)) return;
+    out.add(v);
+  };
+  for (let i = a; i < b; i++) {
+    const c = r[i];
+    (VOICE_TOGGLE[c] || []).forEach(v => put(r.slice(0, i) + v + r.slice(i + 1)));
+    if ((O_ROW + U_ROW).includes(c) && r[i + 1] !== 'う') put(r.slice(0, i + 1) + 'う' + r.slice(i + 1));
+    if (c === 'う' && i > a && (O_ROW + U_ROW).includes(r[i - 1])) put(r.slice(0, i) + r.slice(i + 1));
+    if (E_ROW.includes(c) && r[i + 1] !== 'い') put(r.slice(0, i + 1) + 'い' + r.slice(i + 1));
+    if (c === 'い' && i > a && E_ROW.includes(r[i - 1])) put(r.slice(0, i) + r.slice(i + 1));
+    if (c === 'っ') { put(r.slice(0, i) + r.slice(i + 1)); put(r.slice(0, i) + 'つ' + r.slice(i + 1)); }
+    if (i > a && TSU_BEFORE.includes(c) && !'っんー'.includes(r[i - 1])) put(r.slice(0, i) + 'っ' + r.slice(i));
+    (SMALL_Y[c] || []).forEach(v => put(r.slice(0, i) + v + r.slice(i + 1)));
+  }
+  return [...out];
+}
+
+function readingDistractors(i) {
+  const w = WORD_DATA[i];
+  const picked = new Set([w.reading]);
+  const out = [];
+  const take = list => {
+    for (const v of list) {
+      if (out.length >= 3) break;
+      if (!picked.has(v)) { picked.add(v); out.push(v); }
+    }
+  };
+  take(shuffleArray(readingVariants(w)));
+  if (out.length < 3) {
+    const kanjiChars = [...w.kanji].filter(c => KANJI_RE.test(c));
+    const others = READING_INDICES.filter(j => j !== i);
+    take(shuffleArray(others.filter(j => kanjiChars.some(c => WORD_DATA[j].kanji.includes(c)))).map(j => WORD_DATA[j].reading));
+    take(shuffleArray(others.filter(j => WORD_DATA[j].reading.length === w.reading.length && WORD_DATA[j].reading[0] === w.reading[0])).map(j => WORD_DATA[j].reading));
+    take(shuffleArray(others).map(j => WORD_DATA[j].reading));
+  }
+  return out;
+}
+
+// 표기 퀴즈 오답: 동음이의어 → 같은 한자를 쓰는 단어 → 글자 수가 같은 단어
+function kanjiDistractors(i) {
+  const w = WORD_DATA[i];
+  const picked = new Set([w.kanji]);
+  const out = [];
+  const take = list => {
+    for (const j of list) {
+      if (out.length >= 3) break;
+      const k = WORD_DATA[j].kanji;
+      if (!picked.has(k)) { picked.add(k); out.push(k); }
+    }
+  };
+  const others = READING_INDICES.filter(j => j !== i);
+  const kanjiChars = [...w.kanji].filter(c => KANJI_RE.test(c));
+  // 글자 모양(한자/가나 배치)이 같은 것을 우선: 喫茶店(한한한) → 住宅街, 商店街 …
+  const shape = k => [...k].map(c => (KANJI_RE.test(c) ? 'K' : 'k')).join('');
+  const myShape = shape(w.kanji);
+  const sharesKanji = j => kanjiChars.some(c => WORD_DATA[j].kanji.includes(c));
+  const sameShape = j => shape(WORD_DATA[j].kanji) === myShape;
+  take(shuffleArray(others.filter(j => WORD_DATA[j].reading === w.reading)));   // 동음이의어
+  take(shuffleArray(others.filter(j => sharesKanji(j) && sameShape(j))));
+  take(shuffleArray(others.filter(sameShape)));
+  take(shuffleArray(others.filter(sharesKanji)));
+  take(shuffleArray(others));
+  return out;
+}
+
+/* =========================================================
+   11. 이어서 학습 · 기록 관리 (백업/복원)
+   ========================================================= */
+function renderResume() {
+  const row = document.getElementById('resume-row');
+  if (!row) return;
+  const last = sessions.last;
+  let text = '';
+  if (last && last.kind === 'learn') {
+    const s = sessions.learn && sessions.learn[last.mode];
+    const names = { word: '단어 선 카드', mean: '뜻 선 카드', reading: '읽기 카드' };
+    if (s && s.order && s.order.length) text = `${names[last.mode]} · ${s.idx + 1} / ${s.order.length}번째 역`;
+  } else if (last && last.kind === 'quiz') {
+    const q = sessions.quiz;
+    if (q && q.pool && q.pool.length) text = `실전 퀴즈 · 남은 문제 ${q.pool.length}`;
+  } else if (last && last.kind === 'rquiz') {
+    const q = sessions.rquiz && sessions.rquiz[last.type];
+    if (q && q.pool && q.pool.length) text = `${last.type === 'read' ? '읽기 퀴즈' : '표기 퀴즈'} · 남은 문제 ${q.pool.length}`;
+  }
+  row.hidden = !text;
+  document.getElementById('resume-text').textContent = text;
+}
+
+function resumeLast() {
+  const last = sessions.last;
+  if (!last) return;
+  if (last.kind === 'learn') {
+    if (last.mode === 'reading') {
+      const s = sessions.learn && sessions.learn.reading;
+      if (s && s.scope) readingScope = s.scope;
+    }
+    switchView('learn');
+    startLearnSession(last.mode);
+  } else if (last.kind === 'quiz') {
+    switchView('quiz');
+  } else if (last.kind === 'rquiz') {
+    const q = sessions.rquiz && sessions.rquiz[last.type];
+    if (q && q.scope) readingScope = q.scope;
+    startReadingQuiz(last.type);
+  }
+}
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+function openRecordsModal() {
+  const { pass, fail } = countProgress();
+  const rd = countReading();
+  document.getElementById('rec-mean').textContent = `${pass} / ${fail}`;
+  document.getElementById('rec-read').textContent = `${rd.pass} / ${rd.fail}`;
+  document.getElementById('rec-memo').textContent = memo.mean.size + memo.read.size;
+  const t = lastSavedAt ? `${pad2(lastSavedAt.getHours())}:${pad2(lastSavedAt.getMinutes())}` : '';
+  let status = `이 기기에 자동 저장 중${t ? ' · 마지막 저장 ' + t : ''}`;
+  if (IN_APP_BROWSER) status += ` · ${inAppName()} 안에서는 기록이 지워질 수 있어요`;
+  else if (storagePersisted) status += ' · 브라우저가 임의로 지우지 않게 보호됨';
+  document.getElementById('records-status').textContent = status;
+  document.getElementById('code-restore').hidden = true;
+  document.getElementById('records-modal').hidden = false;
+  document.body.style.overflow = 'hidden';
+}
+
+function closeRecordsModal() {
+  const el = document.getElementById('records-modal');
+  if (el) el.hidden = true;
+  document.body.style.overflow = '';
+}
+
+function downloadBackup() {
+  const data = buildSave();
+  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+  const d = new Date();
+  const name = `JLPT단어장-백업-${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}.json`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 3000);
+  showToast(IN_APP_BROWSER
+    ? '앱 안 브라우저에서는 파일 저장이 안 될 수 있어요. 안 되면 "백업 코드 복사"를 써 주세요.'
+    : '백업 파일을 저장했어요. 다운로드(파일) 폴더에서 확인할 수 있어요.', 5000);
+}
+
+function restoreBackupFile(input) {
+  const file = input.files && input.files[0];
+  input.value = '';
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    let data;
+    try { data = JSON.parse(reader.result); } catch (e) { data = null; }
+    if (!data || data.app !== 'jlpt-wordbook') {
+      showToast('JLPT 단어장 백업 파일이 아니에요');
+      return;
+    }
+    const changed = applySave(data, { force: true });
+    flushSave();
+    updateAllStats();
+    openRecordsModal();
+    showToast(changed > 0 ? `백업에서 기록 ${changed}개를 불러왔어요` : '이미 백업과 같은 기록이에요');
+  };
+  reader.readAsText(file);
+}
+
+function copyBackupCode() {
+  const code = encodeProgress();
+  const label = document.getElementById('copy-code-label');
+  const done = () => {
+    label.textContent = '복사됨!';
+    setTimeout(() => { label.textContent = '백업 코드 복사'; }, 1500);
+    showToast('메모장이나 카톡 "나와의 채팅"에 붙여 넣어 보관하세요', 4000);
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(code).then(done).catch(() => fallbackCopy(code, done));
+  } else {
+    fallbackCopy(code, done);
+  }
+}
+
+function toggleCodeRestore() {
+  const box = document.getElementById('code-restore');
+  box.hidden = !box.hidden;
+  if (!box.hidden) document.getElementById('restore-code').focus();
+}
+
+function restoreFromCode() {
+  const text = document.getElementById('restore-code').value.trim();
+  const m = /p\d+-[sb][0-9A-Za-z._~\-]*/.exec(text);
+  const result = m ? decodeProgress(m[0]) : null;
+  if (!result) { showToast('백업 코드가 올바르지 않아요'); return; }
+  if (result.mismatch) { showToast('단어 목록이 달라서 이 코드로는 복원할 수 없어요'); return; }
+  const changed = applyDecoded(result);
+  flushSave();
+  updateAllStats();
+  document.getElementById('restore-code').value = '';
+  openRecordsModal();
+  showToast(changed > 0 ? `코드에서 기록 ${changed}개를 불러왔어요` : '이미 같은 기록이에요');
+}
+
+/* =========================================================
    앱 시작
    ========================================================= */
-loadProgress();     // 이 기기에 저장된 기록
-importFromUrl();    // QR코드로 받은 기록 (있으면 합치기)
+loadProgress();            // 이 기기에 저장된 기록
+importFromUrl();           // QR코드·다른 브라우저에서 넘어온 기록 (있으면 합치기)
 switchView('home');
+restoreFromIndexedDB();    // 백업 사본과 합치기 (한쪽이 지워졌어도 되살림)
+requestPersistentStorage();
+
+// 앱 안 브라우저(네이버·카카오톡 등)는 기록이 지워질 수 있어서 한 번 안내
+if (IN_APP_BROWSER) {
+  let shown = false;
+  try { shown = sessionStorage.getItem('jlpt-inapp-notice') === '1'; } catch (e) { /* 무시 */ }
+  if (!shown) {
+    showInAppBanner('storage');
+    try { sessionStorage.setItem('jlpt-inapp-notice', '1'); } catch (e) { /* 무시 */ }
+  }
+}
 
 // 이미 열려 있는 탭에서 주소의 # 부분만 바뀐 경우에도 불러오기
 window.addEventListener('hashchange', () => {
